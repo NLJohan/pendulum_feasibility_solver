@@ -189,19 +189,32 @@ bool feasibility_solver::solve_steps(const std::vector<sva::PTransformd> & refSt
     }
 
     const int N_slack = static_cast<int>(N_.rows());
+    // NEW: the bound must be checked BEFORE reading optimalStepsTimings_[tstep_indx],
+    // not after. The previous version read optimalStepsTimings_[tstep_indx] as the
+    // while-condition, then only checked tstep_indx against size() inside the loop
+    // body -- so once tstep_indx reached exactly optimalStepsTimings_.size(), the
+    // very next condition evaluation read optimalStepsTimings_[optimalStepsTimings_.size()],
+    // one past the end of the vector (undefined behavior; std::vector::operator[]
+    // performs no bounds checking), before the break/decrement could run. This is
+    // the same class of bug already fixed in ISMPC_Solver::GetWalkingParameters's
+    // tstep_indx loop, just in a different file/vector -- same author, same
+    // mistake. This is the actual root cause of the production "malloc(): invalid
+    // size (unsorted)" / "free(): corrupted unsorted chunks" crashes: the
+    // subsequent "Next step too far in horizon" message (n_steps computing to 0,
+    // i.e. N_variables == N_slack) is a downstream SYMPTOM of tstep_indx having
+    // already been corrupted by the out-of-bounds read above it, not the bug
+    // itself -- the heap corruption follows shortly after because later code
+    // (Eigen matrix sizing/allocation keyed off n_steps/N_variables) then operates
+    // on state derived from that corrupted read. Restructuring so the bound is
+    // checked as part of the loop condition itself means the invalid index is
+    // never read at all.
     size_t tstep_indx = 0;
-    while(1.5 + t_> optimalStepsTimings_[tstep_indx])
+    while(tstep_indx < optimalStepsTimings_.size() && 1.5 + t_ > optimalStepsTimings_[tstep_indx])
     {
       tstep_indx += 1;
-
-      if(tstep_indx > optimalStepsTimings_.size())
-      {
-        tstep_indx -=1;
-        break;
-      }
     }
-    
-    const int n_steps = tstep_indx;
+
+    const int n_steps = static_cast<int>(tstep_indx);
     const int N_variables = 2 * n_steps + N_slack;
     if(N_variables == N_slack){
         std::cout << "[Pendulum feasibility solver][Steps solver] " << "[iter : " << Niter_ <<"] Next step too far in horizon" << std::endl;
