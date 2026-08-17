@@ -201,6 +201,16 @@ void feasibility_solver::build_time_feasibility_matrix(Eigen::MatrixXd & A_f, Ei
 
 bool feasibility_solver::solve_timings(const std::vector<double> & refTimings, const double & refTds)
 {
+    // NEW DEBUG: state at entry, to compare against what the preceding solve_steps()
+    // call (possibly an early "too far in horizon" return) left behind.
+    std::cout << "[FS DEBUG][solve_timings ENTRY] Niter_=" << Niter_
+               << " N_steps=" << N_steps << " N_timings=" << N_timings
+               << " optimalStepsTimings_.size()=" << optimalStepsTimings_.size()
+               << " optimalDoubleSupportDuration_.size()=" << optimalDoubleSupportDuration_.size()
+               << " refTimings.size()=" << refTimings.size()
+               << " xTimings_.size()=" << xTimings_.size()
+               << std::endl;
+
     const int NStepsTimings = N_steps;
     const int N_slack = static_cast<int>(N_.rows());
     const int N_variables =  NStepsTimings * (N_ds_ + 1) + N_tdsLast + N_slack;
@@ -292,6 +302,16 @@ bool feasibility_solver::solve_timings(const std::vector<double> & refTimings, c
 
     for(int i =  1; i <= NStepsTimings; i++)
     {
+        // NEW DEBUG: bounds check before the unguarded read below. refTimings is a
+        // caller-owned const& argument -- if it's ever shorter than NStepsTimings
+        // (== N_steps), this reads out of bounds via std::vector::operator[].
+        if(static_cast<size_t>(i - 1) >= refTimings.size())
+        {
+            std::cout << "[FS DEBUG][solve_timings OOB refTimings] i=" << i
+                       << " refTimings.size()=" << refTimings.size()
+                       << " NStepsTimings=" << NStepsTimings << " Niter_=" << Niter_ << std::endl;
+            break;
+        }
         t_im1 = refTimings[i-1];
         for (int j = 0 ; j <= (i != N_steps ? N_ds_ : N_tdsLast - 1 )  ; j ++)
         {

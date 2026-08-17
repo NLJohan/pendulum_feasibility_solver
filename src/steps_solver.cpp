@@ -218,6 +218,18 @@ bool feasibility_solver::solve_steps(const std::vector<sva::PTransformd> & refSt
     const int N_variables = 2 * n_steps + N_slack;
     if(N_variables == N_slack){
         std::cout << "[Pendulum feasibility solver][Steps solver] " << "[iter : " << Niter_ <<"] Next step too far in horizon" << std::endl;
+        // NEW DEBUG: dump every container this function and the next solve_timings()
+        // call will touch, right at the moment we take this early-return path.
+        std::cout << "[FS DEBUG][too_far_in_horizon] tstep_indx=" << tstep_indx
+                   << " n_steps=" << n_steps << " N_steps=" << N_steps
+                   << " N_timings=" << N_timings << " N_tdsLast=" << N_tdsLast
+                   << " optimalSteps_.size()=" << optimalSteps_.size()
+                   << " optimalStepsTimings_.size()=" << optimalStepsTimings_.size()
+                   << " optimalDoubleSupportDuration_.size()=" << optimalDoubleSupportDuration_.size()
+                   << " xStep_.size()=" << xStep_.size()
+                   << " xTimings_.size()=" << xTimings_.size()
+                   << " refSteps.size()=" << refSteps.size()
+                   << std::endl;
         return true;
     }
 
@@ -338,8 +350,24 @@ bool feasibility_solver::solve_steps(const std::vector<sva::PTransformd> & refSt
     
 
     // optimalSteps_.clear();
+    // NEW DEBUG: guard the write below -- if optimalSteps_.size() or refSteps.size()
+    // is ever smaller than n_steps here, this would silently corrupt the heap via
+    // std::vector::operator[] (no bounds check) instead of the loud, precise abort
+    // _GLIBCXX_ASSERTIONS would give for an at()-style access. Print and skip rather
+    // than let it write out of bounds.
+    if(static_cast<size_t>(n_steps) > optimalSteps_.size() || static_cast<size_t>(n_steps) > refSteps.size())
+    {
+        std::cout << "[FS DEBUG][solve_steps WRITE OOB] n_steps=" << n_steps
+                   << " optimalSteps_.size()=" << optimalSteps_.size()
+                   << " refSteps.size()=" << refSteps.size()
+                   << " N_steps=" << N_steps << " Niter_=" << Niter_ << std::endl;
+    }
     for (int i = 0 ; i < n_steps ; i++)
     {
+        if(static_cast<size_t>(i) >= optimalSteps_.size() || static_cast<size_t>(i) >= refSteps.size())
+        {
+            break;
+        }
         optimalSteps_[i] = (sva::PTransformd(
                                     refSteps[i].rotation(),
                                     Eigen::Vector3d{solution_(2 * i),solution_(2 * i + 1),refSteps[i].translation().z()})
