@@ -17,6 +17,12 @@ include(cmake/base.cmake)
 
 project(${PROJECT_NAME} LANGUAGES CXX VERSION ${PROJECT_VERSION})
 
+if(DEFINED ENV{FS_ASAN})
+  message(STATUS "pendulum_feasibility_solver: AddressSanitizer ENABLED via FS_ASAN env var")
+  add_compile_options(-fsanitize=address -fno-omit-frame-pointer -g -O1)
+  add_link_options(-fsanitize=address)
+endif()
+
 # find_package(ScsEigen REQUIRED)
 find_package(SpaceVecAlg REQUIRED)
 find_package(eigen-quadprog REQUIRED)
