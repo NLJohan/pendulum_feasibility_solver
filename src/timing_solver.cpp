@@ -201,16 +201,6 @@ void feasibility_solver::build_time_feasibility_matrix(Eigen::MatrixXd & A_f, Ei
 
 bool feasibility_solver::solve_timings(const std::vector<double> & refTimings, const double & refTds)
 {
-    // NEW DEBUG: state at entry, to compare against what the preceding solve_steps()
-    // call (possibly an early "too far in horizon" return) left behind.
-    std::cout << "[FS DEBUG][solve_timings ENTRY] Niter_=" << Niter_
-               << " N_steps=" << N_steps << " N_timings=" << N_timings
-               << " optimalStepsTimings_.size()=" << optimalStepsTimings_.size()
-               << " optimalDoubleSupportDuration_.size()=" << optimalDoubleSupportDuration_.size()
-               << " refTimings.size()=" << refTimings.size()
-               << " xTimings_.size()=" << xTimings_.size()
-               << std::endl;
-
     const int NStepsTimings = N_steps;
     const int N_slack = static_cast<int>(N_.rows());
     const int N_variables =  NStepsTimings * (N_ds_ + 1) + N_tdsLast + N_slack;
@@ -426,6 +416,29 @@ bool feasibility_solver::solve_timings(const std::vector<double> & refTimings, c
     
     optimalStepsTimings_.clear();
     optimalDoubleSupportDuration_.clear();
+    // PURITY GUARD: xTimings_ values feed -log(x)/eta_ below. If a value is <= 0
+    // (or already NaN), the result is NaN/undefined, and previously this NaN was
+    // silently push_back'd into optimalStepsTimings_/optimalDoubleSupportDuration_
+    // and returned as if this were a successful solve (return true). Every
+    // downstream consumer (ISMPC_Solver::GetWalkingParameters, and further QP
+    // solves fed from its constraint matrices) then had no way to distinguish a
+    // genuinely-solved result from silent numerical contamination -- this is the
+    // actual source of the NaN chain this investigation traced end-to-end. Treat
+    // this exactly like a QP failure: stop, don't touch optimalStepsTimings_/
+    // optimalDoubleSupportDuration_ (leave them at their pre-call values, same
+    // contract as the existing "if(!QPsuccess) return false;" path above), and
+    // return false so solve()'s "ret = ret && solve_timings(...)" chain correctly
+    // reports overall failure instead of silently accepting garbage as success.
+    if(!(xTimings_(N_ds_) > 0) || !(xTimings_(N_ds_ + 1) > 0))
+    {
+        std::cout << "[Pendulum feasibility solver][Timing solver] " << "[iter : " << Niter_
+                   << "] optimalStepsTimings_ rebuild aborted: xTimings_(N_ds_)=" << xTimings_(N_ds_)
+                   << " xTimings_(N_ds_+1)=" << xTimings_(N_ds_ + 1) << " (must both be > 0, finite)"
+                   << std::endl;
+        optimalStepsTimings_.clear();
+        optimalDoubleSupportDuration_.clear();
+        return false;
+    }
     double tds_i = -log(xTimings_( N_ds_))/eta_ ;
     double ts_i = -log(xTimings_( (N_ds_ + 1)))/eta_;
     optimalStepsTimings_.push_back(ts_i);
@@ -433,8 +446,30 @@ bool feasibility_solver::solve_timings(const std::vector<double> & refTimings, c
 
     for (int i = 1 ; i < NStepsTimings ; i++)
     {
-        tds_i = (-log(xTimings_( (N_ds_+1) * i + N_ds_))/eta_)  - ts_i;
-        ts_i = -log(xTimings_( (N_ds_ + 1) * (i+1)))/eta_;
+        const Eigen::Index idx1 = (N_ds_+1) * i + N_ds_;
+        const Eigen::Index idx2 = (N_ds_ + 1) * (i+1);
+        if(idx1 >= xTimings_.size() || idx2 >= xTimings_.size())
+        {
+            std::cout << "[Pendulum feasibility solver][Timing solver] " << "[iter : " << Niter_
+                       << "] OOB xTimings_ loop, i=" << i << " idx1=" << idx1 << " idx2=" << idx2
+                       << " xTimings_.size()=" << xTimings_.size() << std::endl;
+            optimalStepsTimings_.clear();
+            optimalDoubleSupportDuration_.clear();
+            return false;
+        }
+        // PURITY GUARD: same reasoning as above, applied inside the loop.
+        if(!(xTimings_(idx1) > 0) || !(xTimings_(idx2) > 0))
+        {
+            std::cout << "[Pendulum feasibility solver][Timing solver] " << "[iter : " << Niter_
+                       << "] optimalStepsTimings_ rebuild aborted at i=" << i
+                       << ": xTimings_(idx1)=" << xTimings_(idx1) << " xTimings_(idx2)=" << xTimings_(idx2)
+                       << " (must both be > 0, finite)" << std::endl;
+            optimalStepsTimings_.clear();
+            optimalDoubleSupportDuration_.clear();
+            return false;
+        }
+        tds_i = (-log(xTimings_( idx1 ))/eta_)  - ts_i;
+        ts_i = -log(xTimings_( idx2 ))/eta_;
 
         
         optimalStepsTimings_.push_back(ts_i);
