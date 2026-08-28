@@ -1,120 +1,121 @@
 #include "../include/pendulum_feasibility_solver/feasibility_solver.h"
 #include "../include/pendulum_feasibility_solver/polygons.h"
 
-void feasibility_solver::kinematics_contraints(Eigen::MatrixXd & A_out, Eigen::VectorXd & b_out, const std::vector<sva::PTransformd> & refSteps)
-{
-    const int N_variables = static_cast<int>(A_out.cols());
-    const int N_slack = static_cast<int>(N_.rows());
-    const int n_steps = static_cast<int>( static_cast<double>(N_variables - N_slack)/2 );
-    // const int n_steps = 1;
+void feasibility_solver::kinematics_contraints(
+    Eigen::MatrixXd& A_out, Eigen::VectorXd& b_out,
+    const std::vector<sva::PTransformd>& refSteps) {
+  const int N_variables = static_cast<int>(A_out.cols());
+  const int N_slack = static_cast<int>(N_.rows());
+  const int n_steps =
+      static_cast<int>(static_cast<double>(N_variables - N_slack) / 2);
+  // const int n_steps = 1;
 
-    assert(n_steps > 0);
-    std::vector<Eigen::VectorXd> b_kin_cstr_vec;
-    std::vector<Eigen::MatrixX2d> kin_cstr_normals_vec;
-    std::vector<Eigen::MatrixX2d> step_cstr_normals_vec;
-    std::vector<Eigen::VectorXd> b_step_cstr_vec;
-    Eigen::MatrixXd Delta = Eigen::MatrixXd::Identity(2 * n_steps, 2 * n_steps); // Matrix to differentiate two footsteps
+  assert(n_steps > 0);
+  std::vector<Eigen::VectorXd> b_kin_cstr_vec;
+  std::vector<Eigen::MatrixX2d> kin_cstr_normals_vec;
+  std::vector<Eigen::MatrixX2d> step_cstr_normals_vec;
+  std::vector<Eigen::VectorXd> b_step_cstr_vec;
+  Eigen::MatrixXd Delta = Eigen::MatrixXd::Identity(
+      2 * n_steps, 2 * n_steps);  // Matrix to differentiate two footsteps
 
-    double l = 1;
-    if(supportFoot_ == "LeftFoot"){l*=-1;}
-    int N_footsteps_kin_cstr = 0;
-    for(int i = 0; i < n_steps; i++)
-    {
-        const double theta_i = rpyFromMat(refSteps[i].rotation()).z();
-        sva::PTransformd X_0_step_im1 = X_0_SupportFoot_;
-        if(i != 0)
-        {
-            X_0_step_im1 = refSteps[i - 1];
-        }
-        const Eigen::Matrix3d R_Theta_i_0 = X_0_step_im1.rotation().transpose();
-        const Eigen::Vector3d offset = R_Theta_i_0 * Eigen::Vector3d{0,l*(feetDistance_ + 0*stepCstrSize_.y()/2),0};
-
-        Rectangle Kinematic_Rectangle = Rectangle(theta_i, stepCstrSize_, offset);
-
-        if(i > 0)
-        {
-            Delta.block(2*i,2*(i-1),2,2) = -Eigen::Matrix2d::Identity();
-        }
-        if(i == 0)
-        {
-            Kinematic_Rectangle = Rectangle(X_0_SupportFoot_, stepCstrSize_, offset);
-        }
-        Polygon Kinematic_Poly = Polygon(Kinematic_Rectangle);
-        b_kin_cstr_vec.push_back(Kinematic_Poly.offsets());
-        kin_cstr_normals_vec.push_back(Kinematic_Poly.normals());
-
-        N_footsteps_kin_cstr += static_cast<int>(kin_cstr_normals_vec.back().rows());
-        l*=-1;
+  double l = 1;
+  if (supportFoot_ == "LeftFoot") {
+    l *= -1;
+  }
+  int N_footsteps_kin_cstr = 0;
+  for (int i = 0; i < n_steps; i++) {
+    const double theta_i = rpyFromMat(refSteps[i].rotation()).z();
+    sva::PTransformd X_0_step_im1 = X_0_SupportFoot_;
+    if (i != 0) {
+      X_0_step_im1 = refSteps[i - 1];
     }
+    const Eigen::Matrix3d R_Theta_i_0 = X_0_step_im1.rotation().transpose();
+    const Eigen::Vector3d offset =
+        R_Theta_i_0 *
+        Eigen::Vector3d{0, l * (feetDistance_ + 0 * stepCstrSize_.y() / 2), 0};
 
-    Eigen::MatrixXd foosteps_kin_cstr = Eigen::MatrixXd::Zero(N_footsteps_kin_cstr, 2 * n_steps);
-    Eigen::VectorXd b_kin_cstr(N_footsteps_kin_cstr);
+    Rectangle Kinematic_Rectangle = Rectangle(theta_i, stepCstrSize_, offset);
 
-    int step = 0;
-    int cstr_index = 0;
-    for(Eigen::Index i_ineq = 0; i_ineq < static_cast<Eigen::Index>(kin_cstr_normals_vec.size()); i_ineq++)
-    {
-
-        Eigen::MatrixX2d ineq = kin_cstr_normals_vec[i_ineq];
-
-        foosteps_kin_cstr.block(cstr_index, step, ineq.rows(), 2) = ineq.block(0, 0, ineq.rows(), 2);
-        b_kin_cstr.segment(cstr_index, ineq.rows()) = b_kin_cstr_vec[i_ineq].segment(0, ineq.rows());
-
-        step += 2;
-        cstr_index += static_cast<int>(ineq.rows());
+    if (i > 0) {
+      Delta.block(2 * i, 2 * (i - 1), 2, 2) = -Eigen::Matrix2d::Identity();
     }
+    if (i == 0) {
+      Kinematic_Rectangle = Rectangle(X_0_SupportFoot_, stepCstrSize_, offset);
+    }
+    Polygon Kinematic_Poly = Polygon(Kinematic_Rectangle);
+    b_kin_cstr_vec.push_back(Kinematic_Poly.offsets());
+    kin_cstr_normals_vec.push_back(Kinematic_Poly.normals());
 
-    A_out.resize(N_footsteps_kin_cstr , N_variables);
-    A_out.setZero();
-    b_out.resize(N_footsteps_kin_cstr);
-    b_out.setZero();
-    A_out.block(0, 0, N_footsteps_kin_cstr, 2 * n_steps) = foosteps_kin_cstr * Delta;
-    b_out.segment(0, N_footsteps_kin_cstr) = b_kin_cstr;
+    N_footsteps_kin_cstr +=
+        static_cast<int>(kin_cstr_normals_vec.back().rows());
+    l *= -1;
+  }
 
+  Eigen::MatrixXd foosteps_kin_cstr =
+      Eigen::MatrixXd::Zero(N_footsteps_kin_cstr, 2 * n_steps);
+  Eigen::VectorXd b_kin_cstr(N_footsteps_kin_cstr);
 
+  int step = 0;
+  int cstr_index = 0;
+  for (Eigen::Index i_ineq = 0;
+       i_ineq < static_cast<Eigen::Index>(kin_cstr_normals_vec.size());
+       i_ineq++) {
+    Eigen::MatrixX2d ineq = kin_cstr_normals_vec[i_ineq];
+
+    foosteps_kin_cstr.block(cstr_index, step, ineq.rows(), 2) =
+        ineq.block(0, 0, ineq.rows(), 2);
+    b_kin_cstr.segment(cstr_index, ineq.rows()) =
+        b_kin_cstr_vec[i_ineq].segment(0, ineq.rows());
+
+    step += 2;
+    cstr_index += static_cast<int>(ineq.rows());
+  }
+
+  A_out.resize(N_footsteps_kin_cstr, N_variables);
+  A_out.setZero();
+  b_out.resize(N_footsteps_kin_cstr);
+  b_out.setZero();
+  A_out.block(0, 0, N_footsteps_kin_cstr, 2 * n_steps) =
+      foosteps_kin_cstr * Delta;
+  b_out.segment(0, N_footsteps_kin_cstr) = b_kin_cstr;
 }
 
-void feasibility_solver::build_steps_feasibility_matrix(Eigen::MatrixXd & A_f, Eigen::VectorXd & b_f, const sva::PTransformd & X_0_supp, const sva::PTransformd & X_0_swg)
-{
-    const int N_slack = static_cast<int>(N_.rows());
-    const int N_variables = 2 * N_steps + N_slack;
+void feasibility_solver::build_steps_feasibility_matrix(
+    Eigen::MatrixXd& A_f, Eigen::VectorXd& b_f,
+    const sva::PTransformd& X_0_supp, const sva::PTransformd& X_0_swg) {
+  const int N_slack = static_cast<int>(N_.rows());
+  const int N_variables = 2 * N_steps + N_slack;
 
-    const Eigen::Vector2d & P_supportFoot_0 = X_0_supp.translation().segment(0,2);
-    const Eigen::Vector2d & P_swingFoot_0 = X_0_swg.translation().segment(0,2);
-    
+  const Eigen::Vector2d& P_supportFoot_0 = X_0_supp.translation().segment(0, 2);
+  const Eigen::Vector2d& P_swingFoot_0 = X_0_swg.translation().segment(0, 2);
 
-    //DCM must remain inside the feasibility region
-    A_f.resize(N_.rows(),N_variables);
-    b_f.resize(A_f.rows());
-    A_f.setZero();
-    b_f.setZero();
-    // A_f * x + b = Of 
-    //A_f * x + b + slack >= N * P_u
+  // DCM must remain inside the feasibility region
+  A_f.resize(N_.rows(), N_variables);
+  b_f.resize(A_f.rows());
+  A_f.setZero();
+  b_f.setZero();
+  // A_f * x + b = Of
+  // A_f * x + b + slack >= N * P_u
 
-    //We generate the cstr for each vertice of the rectangle
-    
-    double tds = optimalDoubleSupportDuration_[0];
-    //i = 0 
- 
-        
-    for (int j = 0 ; j <= N_ds_ ; j++)
-    {
+  // We generate the cstr for each vertice of the rectangle
 
-        double alpha = static_cast<double>(j) / static_cast<double>(N_ds_);
-        // if(!doubleSupport_){alpha = 1;}
-        const double mu_0j = xTimings_[j] ; 
-        const double mu_0jp1 = xTimings_[j+1] ; 
+  double tds = optimalDoubleSupportDuration_[0];
+  // i = 0
 
-        if(doubleSupport_ && j < N_ds_)
-        {
-            b_f += (offsetCstrZMPDblInit_ + N_ * (P_supportFoot_0 +  P_swingFoot_0) * 0.5)*(mu_0j - mu_0jp1);
-        }
-        else
-        {         
-           b_f += (offsetCstrZMP_ + N_ * P_supportFoot_0) *  (mu_0j - mu_0jp1);
-        }
-        
+  for (int j = 0; j <= N_ds_; j++) {
+    double alpha = static_cast<double>(j) / static_cast<double>(N_ds_);
+    // if(!doubleSupport_){alpha = 1;}
+    const double mu_0j = xTimings_[j];
+    const double mu_0jp1 = xTimings_[j + 1];
+
+    if (doubleSupport_ && j < N_ds_) {
+      b_f += (offsetCstrZMPDblInit_ +
+              N_ * (P_supportFoot_0 + P_swingFoot_0) * 0.5) *
+             (mu_0j - mu_0jp1);
+    } else {
+      b_f += (offsetCstrZMP_ + N_ * P_supportFoot_0) * (mu_0j - mu_0jp1);
     }
+  }
 
     //Remainings
     for (int i = 1 ; i <= N_steps; i++)
@@ -218,18 +219,6 @@ bool feasibility_solver::solve_steps(const std::vector<sva::PTransformd> & refSt
     const int N_variables = 2 * n_steps + N_slack;
     if(N_variables == N_slack){
         std::cout << "[Pendulum feasibility solver][Steps solver] " << "[iter : " << Niter_ <<"] Next step too far in horizon" << std::endl;
-        // NEW DEBUG: dump every container this function and the next solve_timings()
-        // call will touch, right at the moment we take this early-return path.
-        std::cout << "[FS DEBUG][too_far_in_horizon] tstep_indx=" << tstep_indx
-                   << " n_steps=" << n_steps << " N_steps=" << N_steps
-                   << " N_timings=" << N_timings << " N_tdsLast=" << N_tdsLast
-                   << " optimalSteps_.size()=" << optimalSteps_.size()
-                   << " optimalStepsTimings_.size()=" << optimalStepsTimings_.size()
-                   << " optimalDoubleSupportDuration_.size()=" << optimalDoubleSupportDuration_.size()
-                   << " xStep_.size()=" << xStep_.size()
-                   << " xTimings_.size()=" << xTimings_.size()
-                   << " refSteps.size()=" << refSteps.size()
-                   << std::endl;
         return true;
     }
 
