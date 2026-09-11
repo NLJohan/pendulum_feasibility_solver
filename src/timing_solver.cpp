@@ -263,35 +263,26 @@ bool feasibility_solver::solve_timings(const std::vector<double>& refTimings,
     }
   }
 
-  for (int i = 1; i <= NStepsTimings; i++) {
-    t_im1 = refTimings[i - 1];
-    for (int j = 0; j <= (i != N_steps ? N_ds_ : N_tdsLast - 1); j++) {
-      double alpha_j = static_cast<double>(j) / static_cast<double>(N_ds_);
-      b_timings((N_ds_ + 1) * i + j) =
-          exp(-eta_ * (t_im1 + alpha_j * (refTds)));
+  for(int i =  1; i <= NStepsTimings; i++)
+  {
+    // NEW DEBUG: bounds check before the unguarded read below. refTimings is a
+    // caller-owned const& argument -- if it's ever shorter than NStepsTimings
+    // (== N_steps), this reads out of bounds via std::vector::operator[].
+    if(static_cast<size_t>(i - 1) >= refTimings.size())
+    {
+        std::cout << "[FS DEBUG][solve_timings OOB refTimings] i=" << i
+                    << " refTimings.size()=" << refTimings.size()
+                    << " NStepsTimings=" << NStepsTimings << " Niter_=" << Niter_ << std::endl;
+        break;
+    }
+    t_im1 = refTimings[i-1];
+    for (int j = 0 ; j <= (i != N_steps ? N_ds_ : N_tdsLast - 1 )  ; j ++)
+    {
+        
+        double alpha_j = static_cast<double>(j)/static_cast<double>(N_ds_);
+        b_timings( (N_ds_ + 1) * i + j) = exp(-eta_ * ( t_im1 + alpha_j * (refTds)) );
     }
   }
-
-    for(int i =  1; i <= NStepsTimings; i++)
-    {
-        // NEW DEBUG: bounds check before the unguarded read below. refTimings is a
-        // caller-owned const& argument -- if it's ever shorter than NStepsTimings
-        // (== N_steps), this reads out of bounds via std::vector::operator[].
-        if(static_cast<size_t>(i - 1) >= refTimings.size())
-        {
-            std::cout << "[FS DEBUG][solve_timings OOB refTimings] i=" << i
-                       << " refTimings.size()=" << refTimings.size()
-                       << " NStepsTimings=" << NStepsTimings << " Niter_=" << Niter_ << std::endl;
-            break;
-        }
-        t_im1 = refTimings[i-1];
-        for (int j = 0 ; j <= (i != N_steps ? N_ds_ : N_tdsLast - 1 )  ; j ++)
-        {
-            
-            double alpha_j = static_cast<double>(j)/static_cast<double>(N_ds_);
-            b_timings( (N_ds_ + 1) * i + j) = exp(-eta_ * ( t_im1 + alpha_j * (refTds)) );
-        }
-      }
   // Keeping slack only on broken cstr
   Eigen::VectorXd x_init = Eigen::VectorXd::Zero(N_variables);
   // x_init.segment(0,N_variables - N_slack) = b_timings;
@@ -382,94 +373,74 @@ bool feasibility_solver::solve_timings(const std::vector<double>& refTimings,
       // ok = false;
     }
   }
-
-  // std::cout << "sol " << Niter_ << std::endl;
-  // for (int i = 0 ; i < N_variables - N_slack ; i++)
-  // {
-  //     std::cout << -log(xTimings_(i))/eta_ << std::endl;
-  // }
-  // std::cout << "Slack Timings: " << QP.result().segment(N_variables - N_slack
-  // ,N_slack) << std::endl;
-
   optimalStepsTimings_.clear();
   optimalDoubleSupportDuration_.clear();
+  // PURITY GUARD: xTimings_ values feed -log(x)/eta_ below. If a value is <= 0
+  // (or already NaN), the result is NaN/undefined, and previously this NaN was
+  // silently push_back'd into optimalStepsTimings_/optimalDoubleSupportDuration_
+  // and returned as if this were a successful solve (return true). Every
+  // downstream consumer (ISMPC_Solver::GetWalkingParameters, and further QP
+  // solves fed from its constraint matrices) then had no way to distinguish a
+  // genuinely-solved result from silent numerical contamination -- this is the
+  // actual source of the NaN chain this investigation traced end-to-end. Treat
+  // this exactly like a QP failure: stop, don't touch optimalStepsTimings_/
+  // optimalDoubleSupportDuration_ (leave them at their pre-call values, same
+  // contract as the existing "if(!QPsuccess) return false;" path above), and
+  // return false so solve()'s "ret = ret && solve_timings(...)" chain correctly
+  // reports overall failure instead of silently accepting garbage as success.
+  if (!(xTimings_(N_ds_) > 0) || !(xTimings_(N_ds_ + 1) > 0)) {
+    std::cout << "[Pendulum feasibility solver][Timing solver] "
+              << "[iter : " << Niter_
+              << "] optimalStepsTimings_ rebuild aborted: xTimings_(N_ds_)="
+              << xTimings_(N_ds_)
+              << " xTimings_(N_ds_+1)=" << xTimings_(N_ds_ + 1)
+              << " (must both be > 0, finite)" << std::endl;
+    optimalStepsTimings_.clear();
+    optimalDoubleSupportDuration_.clear();
+    return false;
+  }
   double tds_i = -log(xTimings_(N_ds_)) / eta_;
   double ts_i = -log(xTimings_((N_ds_ + 1))) / eta_;
   optimalStepsTimings_.push_back(ts_i);
   optimalDoubleSupportDuration_.push_back(tds_i);
 
   for (int i = 1; i < NStepsTimings; i++) {
-    tds_i = (-log(xTimings_((N_ds_ + 1) * i + N_ds_)) / eta_) - ts_i;
-    ts_i = -log(xTimings_((N_ds_ + 1) * (i + 1))) / eta_;
-
-    if(!QPsuccess)
-    {
-        return true;
+    const Eigen::Index idx1 = (N_ds_ + 1) * i + N_ds_;
+    const Eigen::Index idx2 = (N_ds_ + 1) * (i + 1);
+    if (idx1 >= xTimings_.size() || idx2 >= xTimings_.size()) {
+      std::cout << "[Pendulum feasibility solver][Timing solver] "
+                << "[iter : " << Niter_ << "] OOB xTimings_ loop, i=" << i
+                << " idx1=" << idx1 << " idx2=" << idx2
+                << " xTimings_.size()=" << xTimings_.size() << std::endl;
+      optimalStepsTimings_.clear();
+      optimalDoubleSupportDuration_.clear();
+      return false;
     }
-
-    xTimings_ = QP.result().segment(0,N_variables - N_slack);
-    Eigen::Vector4d feasibilityOffset = exp(eta_ * t_) * ( A_f * QP.result() + b_f);
-    Polygon feasibilityPolygon = Polygon(N_,feasibilityOffset);
-    feasibilityRegion_ = feasibilityPolygon.Get_Polygone_Corners();
-
-    optimalStepsTimings_.clear();
-    optimalDoubleSupportDuration_.clear();
-    if(!(xTimings_(N_ds_) > 0) || !(xTimings_(N_ds_ + 1) > 0))
-    {
-        optimalStepsTimings_.clear();
-        optimalDoubleSupportDuration_.clear();
-        return false;
+    // PURITY GUARD: same reasoning as above, applied inside the loop.
+    if (!(xTimings_(idx1) > 0) || !(xTimings_(idx2) > 0)) {
+      std::cout << "[Pendulum feasibility solver][Timing solver] "
+                << "[iter : " << Niter_
+                << "] optimalStepsTimings_ rebuild aborted at i=" << i
+                << ": xTimings_(idx1)=" << xTimings_(idx1)
+                << " xTimings_(idx2)=" << xTimings_(idx2)
+                << " (must both be > 0, finite)" << std::endl;
+      optimalStepsTimings_.clear();
+      optimalDoubleSupportDuration_.clear();
+      return false;
     }
-    double tds_i = -log(xTimings_( N_ds_))/eta_ ;
-    double ts_i = -log(xTimings_( (N_ds_ + 1)))/eta_;
+    tds_i = (-log(xTimings_(idx1)) / eta_) - ts_i;
+    ts_i = -log(xTimings_(idx2)) / eta_;
+
     optimalStepsTimings_.push_back(ts_i);
     optimalDoubleSupportDuration_.push_back(tds_i);
-
-    for (int i = 1 ; i < NStepsTimings ; i++)
-    {
-        const Eigen::Index idx1 = (N_ds_+1) * i + N_ds_;
-        const Eigen::Index idx2 = (N_ds_ + 1) * (i+1);
-        if(idx1 >= xTimings_.size() || idx2 >= xTimings_.size())
-        {
-            optimalStepsTimings_.clear();
-            optimalDoubleSupportDuration_.clear();
-            return false;
-        }
-        if(!(xTimings_(idx1) > 0) || !(xTimings_(idx2) > 0))
-        {
-            optimalStepsTimings_.clear();
-            optimalDoubleSupportDuration_.clear();
-            return false;
-        }
-        tds_i = (-log(xTimings_( idx1 ))/eta_)  - ts_i;
-        ts_i = -log(xTimings_( idx2 ))/eta_;
-
-        optimalStepsTimings_.push_back(ts_i);
-        optimalDoubleSupportDuration_.push_back(tds_i);
+  }
+  if (!doubleSupport_) {
+    if (optimalDoubleSupportDuration_.size() >= 2) {
+      optimalDoubleSupportDuration_[0] = optimalDoubleSupportDuration_[1];
+    } else {
+      optimalDoubleSupportDuration_[0] = refTds;
     }
-    if(!doubleSupport_)
-    {
-        if(optimalDoubleSupportDuration_.size() >= 2)
-        {
-            optimalDoubleSupportDuration_[0] = optimalDoubleSupportDuration_[1];
-        }
-        else
-        {
-            optimalDoubleSupportDuration_[0] = refTds;
-        }
-    }
-    }
-  
+  }
 
-  // std::cout << "solution Ts" << std::endl;
-  // for (int i = 0 ; i < optimalStepsTimings_.size() ; i++)
-  // {
-  //     std::cout << optimalStepsTimings_[i] << std::endl;
-  // }
-  // std::cout << "solution Tds" << std::endl;
-  // for (int i = 0 ; i < optimalDoubleSupportDuration_.size() ; i++)
-  // {
-  //     std::cout << optimalDoubleSupportDuration_[i] << std::endl;
-  // }
   return true;
 }
