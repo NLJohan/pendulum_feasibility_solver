@@ -99,8 +99,42 @@ void feasibility_solver::build_steps_feasibility_matrix(
 
   // We generate the cstr for each vertice of the rectangle
 
+  // NEW DEBUG: bounds guard. optimalDoubleSupportDuration_ is populated by
+  // solve_timings() and can be left EMPTY if solve_timings() took a
+  // purity-guard early-return (see timing_solver.cpp) -- reading index 0 of
+  // an empty vector via operator[] is unchecked UB, not a thrown exception.
+  // If this ever fires, it means solve_steps()/build_steps_feasibility_matrix()
+  // is being reached despite solve_timings() having failed on the same
+  // iteration, which is a caller-side contract question (see solve()) as much
+  // as a guard-placement one.
+  if (optimalDoubleSupportDuration_.empty()) {
+    std::cout << "[FS DEBUG][build_steps_feasibility_matrix EMPTY "
+                 "optimalDoubleSupportDuration_] Niter_="
+              << Niter_ << std::endl;
+    b_f.setZero();
+    return;
+  }
   double tds = optimalDoubleSupportDuration_[0];
   // i = 0
+
+  // NEW DEBUG: xTimings_ must have at least N_steps * (N_ds_ + 1) + N_tdsLast
+  // entries for every index below to be in-bounds. This is populated by
+  // solve_timings() (full size) or solve_steps() itself (fixed size,
+  // N_timings * (N_ds_+1) + N_tdsLast) -- if the two ever disagree in size,
+  // or if xTimings_ was left in a stale/shorter state from a prior partial
+  // solve, every xTimings_[...] read below is potentially OOB.
+  const Eigen::Index xTimings_min_size =
+      static_cast<Eigen::Index>(N_steps) * (N_ds_ + 1) + N_tdsLast;
+  if (xTimings_.size() < xTimings_min_size) {
+    std::cout << "[FS DEBUG][build_steps_feasibility_matrix xTimings_ TOO "
+                 "SHORT] xTimings_.size()="
+              << xTimings_.size()
+              << " required>=" << xTimings_min_size << " N_steps=" << N_steps
+              << " N_ds_=" << N_ds_ << " N_tdsLast=" << N_tdsLast
+              << " Niter_=" << Niter_ << std::endl;
+    b_f.setZero();
+    return;
+  }
 
   for (int j = 0; j <= N_ds_; j++) {
     double alpha = static_cast<double>(j) / static_cast<double>(N_ds_);
@@ -117,253 +151,291 @@ void feasibility_solver::build_steps_feasibility_matrix(
     }
   }
 
-    //Remainings
-    for (int i = 1 ; i <= N_steps; i++)
-    {
-        const int step_indx_im1 = 2 * (i-1);
-        const int step_indx_im2 = 2 * (i-2);
-        for (int j = 0 ; j <= (i != N_steps ? N_ds_ : N_tdsLast - 1)  ; j++)
-        {
-            const double mu_ij =  xTimings_[ i * (N_ds_ + 1) + j ]; 
-            const double alpha = static_cast<double>(j + 1) / static_cast<double>(N_ds_ + 1);
-            double mu_ijp1 = 0;
-            if( !(i == N_steps && j == N_tdsLast - 1) )
-            {
-                mu_ijp1 = xTimings_[ i * (N_ds_ + 1) + j + 1 ]; 
-            }
+  // Remainings
+  for (int i = 1; i <= N_steps; i++) {
+    const int step_indx_im1 = 2 * (i - 1);
+    const int step_indx_im2 = 2 * (i - 2);
+    for (int j = 0; j <= (i != N_steps ? N_ds_ : N_tdsLast - 1); j++) {
+      const double mu_ij = xTimings_[i * (N_ds_ + 1) + j];
+      const double alpha =
+          static_cast<double>(j + 1) / static_cast<double>(N_ds_ + 1);
+      double mu_ijp1 = 0;
+      if (!(i == N_steps && j == N_tdsLast - 1)) {
+        mu_ijp1 = xTimings_[i * (N_ds_ + 1) + j + 1];
+      }
 
-            
-            A_f.block(0,step_indx_im1,4,2) += N_ * (mu_ij - mu_ijp1) * alpha;
-            if(i > 1)
-            {
-                A_f.block(0,step_indx_im2,4,2) += N_ * (mu_ij - mu_ijp1) * (1 - alpha) ;
-            }
-            else
-            {
-                b_f += N_ * P_supportFoot_0 * (mu_ij - mu_ijp1) * (1 - alpha);
-            }
-            b_f += offsetCstrZMP_ * (mu_ij - mu_ijp1) ;
-            
-        }
+      A_f.block(0, step_indx_im1, 4, 2) += N_ * (mu_ij - mu_ijp1) * alpha;
+      if (i > 1) {
+        A_f.block(0, step_indx_im2, 4, 2) +=
+            N_ * (mu_ij - mu_ijp1) * (1 - alpha);
+      } else {
+        b_f += N_ * P_supportFoot_0 * (mu_ij - mu_ijp1) * (1 - alpha);
+      }
+      b_f += offsetCstrZMP_ * (mu_ij - mu_ijp1);
     }
-    b_f *= kappa_;
-    b_f -= N_ * gamma_* exp(-eta_ * t_);
-    A_f *= kappa_;
-    // std::cout << "A_f" << std::endl << A_f.block(0,0,4,N_variables) << std::endl;
-
+  }
+  b_f *= kappa_;
+  b_f -= N_ * gamma_ * exp(-eta_ * t_);
+  A_f *= kappa_;
+  // std::cout << "A_f" << std::endl << A_f.block(0,0,4,N_variables) 
+  // std::endl;
 }
 
-bool feasibility_solver::solve_steps(const std::vector<sva::PTransformd> & refSteps)
-{
-
-    xTimings_ = Eigen::VectorXd::Zero(N_timings * (N_ds_ + 1) + N_tdsLast);
-    double t_im1 =  0;
-    for (int j = 0 ; j <= N_ds_  ; j ++)
-    {
-        
-        double alpha_j = static_cast<double>(j)/static_cast<double>(N_ds_);
-        if(doubleSupport_)
-        {
-            xTimings_(j) = exp(-eta_ * ( t_ + alpha_j * (optimalDoubleSupportDuration_[0] - t_)) );
-        }
-        else
-        {
-            xTimings_(j) = exp(-eta_ * t_ );
-        }
-
-    }
-    for(int i = 1 ; i <= N_steps ; i++)
-    {
-
-
-        t_im1 = i == 1 ? optimalStepsTimings_[0] : t_im1 + (optimalStepsTimings_[i-1] - optimalStepsTimings_[i-2]) ;
-
-    
-        for (int j = 0 ; j <= (i != N_steps ? N_ds_ : N_tdsLast - 1 )  ; j ++)
-        {
-            
-            double alpha_j = static_cast<double>(j)/static_cast<double>(N_ds_);
-            xTimings_( (N_ds_ + 1) * i + j) = exp(-eta_ * ( t_im1 + alpha_j * (refTds_)) );
-
-        }
-        
-    }
-
-    const int N_slack = static_cast<int>(N_.rows());
-    // NEW: the bound must be checked BEFORE reading optimalStepsTimings_[tstep_indx],
-    // not after. The previous version read optimalStepsTimings_[tstep_indx] as the
-    // while-condition, then only checked tstep_indx against size() inside the loop
-    // body -- so once tstep_indx reached exactly optimalStepsTimings_.size(), the
-    // very next condition evaluation read optimalStepsTimings_[optimalStepsTimings_.size()],
-    // one past the end of the vector (undefined behavior; std::vector::operator[]
-    // performs no bounds checking), before the break/decrement could run. This is
-    // the same class of bug already fixed in ISMPC_Solver::GetWalkingParameters's
-    // tstep_indx loop, just in a different file/vector -- same author, same
-    // mistake. This is the actual root cause of the production "malloc(): invalid
-    // size (unsorted)" / "free(): corrupted unsorted chunks" crashes: the
-    // subsequent "Next step too far in horizon" message (n_steps computing to 0,
-    // i.e. N_variables == N_slack) is a downstream SYMPTOM of tstep_indx having
-    // already been corrupted by the out-of-bounds read above it, not the bug
-    // itself -- the heap corruption follows shortly after because later code
-    // (Eigen matrix sizing/allocation keyed off n_steps/N_variables) then operates
-    // on state derived from that corrupted read. Restructuring so the bound is
-    // checked as part of the loop condition itself means the invalid index is
-    // never read at all.
-    size_t tstep_indx = 0;
-    while(tstep_indx < optimalStepsTimings_.size() && 1.5 + t_ > optimalStepsTimings_[tstep_indx])
-    {
-      tstep_indx += 1;
-    }
-
-    const int n_steps = static_cast<int>(tstep_indx);
-    const int N_variables = 2 * n_steps + N_slack;
-    if(N_variables == N_slack){
-        std::cout << "[Pendulum feasibility solver][Steps solver] " << "[iter : " << Niter_ <<"] Next step too far in horizon" << std::endl;
-        return true;
-    }
-
-
-    //DCM must remain inside the feasibility region
-    Eigen::MatrixXd A_f = Eigen::MatrixXd::Zero(4,N_variables);
-    Eigen::MatrixXd A_f_gen;
-    Eigen::VectorXd b_f;
-    
-    build_steps_feasibility_matrix(A_f_gen,b_f,X_0_SupportFoot_,X_0_SwingFoot_);
-    if(n_steps < N_steps)
-    {
-        b_f += A_f_gen.block(0,2 * n_steps,A_f_gen.rows(),2 * (N_steps - n_steps)) * 
-            xStep_.segment(2 * n_steps , 2 * (N_steps - n_steps) );
-
-        A_f.block(0,0,A_f_gen.rows(),2*n_steps) = A_f_gen.block(0,0,A_f_gen.rows(),2 * n_steps);
-    }
-
-    //Kinematics Constraints
-    Eigen::MatrixXd A_kin = Eigen::MatrixXd::Zero(0,N_variables);
-    Eigen::VectorXd b_kin = Eigen::VectorXd::Zero(0);
-    kinematics_contraints(A_kin,b_kin,refSteps_);
-
-    Eigen::MatrixXd A_ineq = Eigen::MatrixXd::Zero(A_kin.rows() + A_f.rows() , N_variables);
-    Eigen::VectorXd b_ineq = Eigen::VectorXd::Zero(A_ineq.rows());
-    A_ineq <<           - A_f *  exp(eta_ * t_)        , A_kin ;
-    b_ineq <<    (b_f * exp(eta_ * t_) - (N_ * dcm_) ) , b_kin ;
-    
-    // Slack Variables
-    A_ineq.block(0,2 * n_steps , N_slack , N_slack ) = Eigen::Matrix4d::Identity() ;
-
-    const int NineqCstr = static_cast<int>(A_ineq.rows()); 
-
-    Eigen::MatrixXd A_eq = Eigen::MatrixXd::Zero(0 , N_variables);
-    Eigen::VectorXd b_eq = Eigen::VectorXd::Zero(A_eq.rows());
-    const int NeqCstr = static_cast<int>(A_eq.rows()); 
-    
-    //Cost function
-    
-    Eigen::MatrixXd M_steps = Eigen::MatrixXd::Zero(2 * n_steps,N_variables);
-    M_steps.block(0,0,2*n_steps,2*n_steps) = Eigen::MatrixXd::Identity(2 * n_steps,2 * n_steps);
-    Eigen::VectorXd b_steps = Eigen::VectorXd::Zero(M_steps.rows());
-    for(int i = 0; i < n_steps; i++)
-    {
-        b_steps.segment(2 * i, 2) = refSteps[i].translation().segment(0, 2);
-    }
-    
-    Eigen::MatrixXd M_slack = Eigen::MatrixXd::Zero(N_slack,N_variables);
-    M_slack.block(0,2 * n_steps,N_slack,N_slack) = Eigen::MatrixXd::Identity(N_slack,N_slack);
-    const Eigen::VectorXd b_slack = Eigen::VectorXd::Zero(M_slack.rows());
-
-    Eigen::VectorXd x_init = Eigen::VectorXd::Zero(N_variables);
-    // x_init.segment(0,2*n_steps) = b_steps;
-    x_init.segment(0,2*n_steps) = xStep_.segment(0,2*n_steps);
-
-    Eigen::Vector4d feasibilityOffsetInit = exp(eta_ * t_) * ( A_f * x_init + b_f);
-    Eigen::Vector4d dcm_pose = N_ * dcm_;
-
-    // std::cout << "[Pendulum feasibility solver][Steps solver] init offset " << std::endl << feasibilityOffsetInit << std::endl;
-
-    
-    for (int i = 0 ; i < 4 ; i++)
-    {
-        if(feasibilityOffsetInit(i) < dcm_pose(i) - 1e5)
-        {
-            std::cout << "[Pendulum feasibility solver][Steps solver] " << "[iter : " << Niter_ <<"] broken cstr on " << i << std::endl;
-            std::cout << "offset delta " << feasibilityOffsetInit(i) - dcm_pose(i) << std::endl;
-
-        }
-    }
-    // std::cout << "A_ineq" << std::endl << A_ineq.block(0,0,4,N_variables) << std::endl;
-    // std::cout << "b_ineq" << std::endl << b_ineq << std::endl;
-    // std::cout << "N(i) " << std::endl << N_.row(i) << std::endl;
-
-    Eigen::MatrixXd Q_cost = betaSteps * ( M_steps.transpose() * M_steps) + 1e7 * ( M_slack.transpose() * M_slack) ;
-    // Q_cost += 1e6 * (- A_f *  exp(eta_ * t_)).transpose() * (- A_f *  exp(eta_ * t_));
-    Eigen::VectorXd c_cost = betaSteps * (-M_steps.transpose() * b_steps) ;
-    // c_cost += 1e6 * (A_f *  exp(eta_ * t_)).transpose() * (b_f * exp(eta_ * t_) - (N_ * dcm_) );
-
-    Eigen::QuadProgDense QP;
-    // QP.tolerance(5e-4);
-    QP.problem(N_variables, NeqCstr,NineqCstr);
-    bool QPsuccess = QP.solve(Q_cost, c_cost, A_eq, b_eq, A_ineq, b_ineq);
-
-    // if(!QPsuccess)
-    // {
-    //     std::cout << "[Pendulum feasibility solver][Steps solver] " << "[iter : " << Niter_ <<"] QP Failed, lowering slack" << std::endl;
-    //     M_slack.block(0,2 * n_steps,N_slack,N_slack) = 1e0 * Eigen::MatrixXd::Identity(N_slack,N_slack);
-    //     Q_cost = betaSteps * ( M_steps.transpose() * M_steps) + ( M_slack.transpose() * M_slack) ;
-    //     c_cost = betaSteps * (-M_steps.transpose() * b_steps) + (-M_slack.transpose() * b_slack) ;
-    //     QPsuccess = QP.solve(Q_cost, c_cost, A_eq, b_eq, A_ineq, b_ineq);
-    // }
-
-    if(!QPsuccess)
-    {
-        std::cout << "[Pendulum feasibility solver][Steps solver] " << "[iter : " << Niter_ <<"] QP Failed" << std::endl;
+bool feasibility_solver::solve_steps(
+    const std::vector<sva::PTransformd>& refSteps) {
+  xTimings_ = Eigen::VectorXd::Zero(N_timings * (N_ds_ + 1) + N_tdsLast);
+  double t_im1 = 0;
+  for (int j = 0; j <= N_ds_; j++) {
+    double alpha_j = static_cast<double>(j) / static_cast<double>(N_ds_);
+    if (doubleSupport_) {
+      // NEW DEBUG: same empty-vector guard as build_steps_feasibility_matrix
+      // above -- optimalDoubleSupportDuration_[0] is read here too, on the
+      // doubleSupport_ branch, before build_steps_feasibility_matrix() is
+      // even called.
+      if (optimalDoubleSupportDuration_.empty()) {
+        std::cout << "[FS DEBUG][solve_steps EMPTY "
+                     "optimalDoubleSupportDuration_] Niter_="
+                  << Niter_ << std::endl;
         return false;
+      }
+      xTimings_(j) =
+          exp(-eta_ * (t_ + alpha_j * (optimalDoubleSupportDuration_[0] - t_)));
+    } else {
+      xTimings_(j) = exp(-eta_ * t_);
     }
-    
-    solution_ = QP.result();
-
-    Eigen::Vector4d feasibilityOffset = exp(eta_ * t_) * ( A_f.block(0,0,4,2*n_steps) * solution_.segment(0,2*n_steps) + b_f);
-    // std::cout << "[Pendulum feasibility solver][Steps solver] output offset " << std::endl << feasibilityOffset << std::endl;
-
-
-    for (int i = 0 ; i < 4 ; i++)
-    {
-        if(feasibilityOffset(i) < dcm_pose(i) - 1e-5)
-        {
-            std::cout << "[Pendulum feasibility solver][Steps solver] " << "[iter : " << Niter_ <<"] solution broken cstr on " << i << std::endl;
-            std::cout << "slack : " << solution_.segment(2 * n_steps + i,1) << std::endl;
-        }
+  }
+  for (int i = 1; i <= N_steps; i++) {
+    // NEW DEBUG: optimalStepsTimings_[i-1]/[i-2] read below require
+    // optimalStepsTimings_.size() >= N_steps. Same staleness concern as
+    // above: this vector is populated by solve_timings(), and a prior
+    // purity-guard failure there leaves it empty or short.
+    if (static_cast<size_t>(i - 1) >= optimalStepsTimings_.size() ||
+        (i >= 2 && static_cast<size_t>(i - 2) >= optimalStepsTimings_.size())) {
+      std::cout << "[FS DEBUG][solve_steps OOB optimalStepsTimings_] i=" << i
+                << " optimalStepsTimings_.size()="
+                << optimalStepsTimings_.size() << " N_steps=" << N_steps
+                << " Niter_=" << Niter_ << std::endl;
+      return false;
     }
-    Polygon feasibilityPolygon = Polygon(N_,feasibilityOffset);
-    feasibilityRegion_ = feasibilityPolygon.Get_Polygone_Corners();
+    t_im1 = i == 1 ? optimalStepsTimings_[0]
+                   : t_im1 + (optimalStepsTimings_[i - 1] -
+                              optimalStepsTimings_[i - 2]);
 
-    // std::cout << "Slack Steps: " << solution_.segment(2 * n_steps,N_slack) << std::endl;
-    
-
-    // optimalSteps_.clear();
-    // NEW DEBUG: guard the write below -- if optimalSteps_.size() or refSteps.size()
-    // is ever smaller than n_steps here, this would silently corrupt the heap via
-    // std::vector::operator[] (no bounds check) instead of the loud, precise abort
-    // _GLIBCXX_ASSERTIONS would give for an at()-style access. Print and skip rather
-    // than let it write out of bounds.
-    if(static_cast<size_t>(n_steps) > optimalSteps_.size() || static_cast<size_t>(n_steps) > refSteps.size())
-    {
-        std::cout << "[FS DEBUG][solve_steps WRITE OOB] n_steps=" << n_steps
-                   << " optimalSteps_.size()=" << optimalSteps_.size()
-                   << " refSteps.size()=" << refSteps.size()
-                   << " N_steps=" << N_steps << " Niter_=" << Niter_ << std::endl;
+    for (int j = 0; j <= (i != N_steps ? N_ds_ : N_tdsLast - 1); j++) {
+      double alpha_j = static_cast<double>(j) / static_cast<double>(N_ds_);
+      xTimings_((N_ds_ + 1) * i + j) =
+          exp(-eta_ * (t_im1 + alpha_j * (refTds_)));
     }
-    for (int i = 0 ; i < n_steps ; i++)
-    {
-        if(static_cast<size_t>(i) >= optimalSteps_.size() || static_cast<size_t>(i) >= refSteps.size())
-        {
-            break;
-        }
-        optimalSteps_[i] = (sva::PTransformd(
-                                    refSteps[i].rotation(),
-                                    Eigen::Vector3d{solution_(2 * i),solution_(2 * i + 1),refSteps[i].translation().z()})
-                                );
-        xStep_.segment(2 * i , 2) = solution_.segment(2 * i,2);
+  }
 
+  const int N_slack = static_cast<int>(N_.rows());
+  // NEW: the bound must be checked BEFORE reading optimalStepsTimings_[tstep_indx],
+  // not after. The previous version read optimalStepsTimings_[tstep_indx] as the
+  // while-condition, then only checked tstep_indx against size() inside the loop
+  // body -- so once tstep_indx reached exactly optimalStepsTimings_.size(), the
+  // very next condition evaluation read optimalStepsTimings_[optimalStepsTimings_.size()],
+  // one past the end of the vector (undefined behavior; std::vector::operator[]
+  // performs no bounds checking), before the break/decrement could run. This is
+  // the same class of bug already fixed in ISMPC_Solver::GetWalkingParameters's
+  // tstep_indx loop, just in a different file/vector -- same author, same
+  // mistake. This is the actual root cause of the production "malloc(): invalid
+  // size (unsorted)" / "free(): corrupted unsorted chunks" crashes: the
+  // subsequent "Next step too far in horizon" message (n_steps computing to 0,
+  // i.e. N_variables == N_slack) is a downstream SYMPTOM of tstep_indx having
+  // already been corrupted by the out-of-bounds read above it, not the bug
+  // itself -- the heap corruption follows shortly after because later code
+  // (Eigen matrix sizing/allocation keyed off n_steps/N_variables) then operates
+  // on state derived from that corrupted read. Restructuring so the bound is
+  // checked as part of the loop condition itself means the invalid index is
+  // never read at all.
+  size_t tstep_indx = 0;
+  while (tstep_indx < optimalStepsTimings_.size() &&
+         1.5 + t_ > optimalStepsTimings_[tstep_indx]) {
+    tstep_indx += 1;
+  }
 
-    } 
+  const int n_steps = static_cast<int>(tstep_indx);
+  const int N_variables = 2 * n_steps + N_slack;
+  if (N_variables == N_slack) {
+    std::cout << "[Pendulum feasibility solver][Steps solver] "
+              << "[iter : " << Niter_ << "] Next step too far in horizon"
+              << std::endl;
+    // NEW DEBUG: dump every container this function and the next solve_timings()
+    // call will touch, right at the moment we take this early-return path.
+    std::cout << "[FS DEBUG][too_far_in_horizon] tstep_indx=" << tstep_indx
+              << " n_steps=" << n_steps << " N_steps=" << N_steps
+              << " N_timings=" << N_timings << " N_tdsLast=" << N_tdsLast
+              << " optimalSteps_.size()=" << optimalSteps_.size()
+              << " optimalStepsTimings_.size()=" << optimalStepsTimings_.size()
+              << " optimalDoubleSupportDuration_.size()="
+              << optimalDoubleSupportDuration_.size()
+              << " xStep_.size()=" << xStep_.size()
+              << " xTimings_.size()=" << xTimings_.size()
+              << " refSteps.size()=" << refSteps.size() << std::endl;
     return true;
+  }
+
+  // DCM must remain inside the feasibility region
+  Eigen::MatrixXd A_f = Eigen::MatrixXd::Zero(4, N_variables);
+  Eigen::MatrixXd A_f_gen;
+  Eigen::VectorXd b_f;
+
+  build_steps_feasibility_matrix(A_f_gen, b_f, X_0_SupportFoot_,
+                                 X_0_SwingFoot_);
+  if (n_steps < N_steps) {
+    // NEW DEBUG: xStep_ must have at least 2*N_steps entries for this segment
+    // read to be in-bounds.
+    if (xStep_.size() < 2 * N_steps) {
+      std::cout << "[FS DEBUG][solve_steps xStep_ TOO SHORT] xStep_.size()="
+                << xStep_.size() << " required>=" << 2 * N_steps
+                << " n_steps=" << n_steps << " N_steps=" << N_steps
+                << " Niter_=" << Niter_ << std::endl;
+      return false;
+    }
+    b_f +=
+        A_f_gen.block(0, 2 * n_steps, A_f_gen.rows(), 2 * (N_steps - n_steps)) *
+        xStep_.segment(2 * n_steps, 2 * (N_steps - n_steps));
+
+    A_f.block(0, 0, A_f_gen.rows(), 2 * n_steps) =
+        A_f_gen.block(0, 0, A_f_gen.rows(), 2 * n_steps);
+  }
+
+  // Kinematics Constraints
+  Eigen::MatrixXd A_kin = Eigen::MatrixXd::Zero(0, N_variables);
+  Eigen::VectorXd b_kin = Eigen::VectorXd::Zero(0);
+  kinematics_contraints(A_kin, b_kin, refSteps_);
+
+  Eigen::MatrixXd A_ineq =
+      Eigen::MatrixXd::Zero(A_kin.rows() + A_f.rows(), N_variables);
+  Eigen::VectorXd b_ineq = Eigen::VectorXd::Zero(A_ineq.rows());
+  A_ineq << -A_f * exp(eta_ * t_), A_kin;
+  b_ineq << (b_f * exp(eta_ * t_) - (N_ * dcm_)), b_kin;
+
+  // Slack Variables
+  A_ineq.block(0, 2 * n_steps, N_slack, N_slack) = Eigen::Matrix4d::Identity();
+
+  const int NineqCstr = static_cast<int>(A_ineq.rows());
+
+  Eigen::MatrixXd A_eq = Eigen::MatrixXd::Zero(0, N_variables);
+  Eigen::VectorXd b_eq = Eigen::VectorXd::Zero(A_eq.rows());
+  const int NeqCstr = static_cast<int>(A_eq.rows());
+
+  // Cost function
+
+  Eigen::MatrixXd M_steps = Eigen::MatrixXd::Zero(2 * n_steps, N_variables);
+  M_steps.block(0, 0, 2 * n_steps, 2 * n_steps) =
+      Eigen::MatrixXd::Identity(2 * n_steps, 2 * n_steps);
+  Eigen::VectorXd b_steps = Eigen::VectorXd::Zero(M_steps.rows());
+  for (int i = 0; i < n_steps; i++) {
+    b_steps.segment(2 * i, 2) = refSteps[i].translation().segment(0, 2);
+  }
+
+  Eigen::MatrixXd M_slack = Eigen::MatrixXd::Zero(N_slack, N_variables);
+  M_slack.block(0, 2 * n_steps, N_slack, N_slack) =
+      Eigen::MatrixXd::Identity(N_slack, N_slack);
+  const Eigen::VectorXd b_slack = Eigen::VectorXd::Zero(M_slack.rows());
+
+  Eigen::VectorXd x_init = Eigen::VectorXd::Zero(N_variables);
+  // x_init.segment(0,2*n_steps) = b_steps;
+  x_init.segment(0, 2 * n_steps) = xStep_.segment(0, 2 * n_steps);
+
+  Eigen::Vector4d feasibilityOffsetInit = exp(eta_ * t_) * (A_f * x_init + b_f);
+  Eigen::Vector4d dcm_pose = N_ * dcm_;
+
+  // std::cout << "[Pendulum feasibility solver][Steps solver] init offset " 
+  // std::endl << feasibilityOffsetInit << std::endl;
+
+  for (int i = 0; i < 4; i++) {
+    if (feasibilityOffsetInit(i) < dcm_pose(i) - 1e5) {
+      std::cout << "[Pendulum feasibility solver][Steps solver] "
+                << "[iter : " << Niter_ << "] broken cstr on " << i
+                << std::endl;
+      std::cout << "offset delta " << feasibilityOffsetInit(i) - dcm_pose(i)
+                << std::endl;
+    }
+  }
+  // std::cout << "A_ineq" << std::endl << A_ineq.block(0,0,4,N_variables) 
+  // std::endl; std::cout << "b_ineq" << std::endl << b_ineq << std::endl;
+  // std::cout << "N(i) " << std::endl << N_.row(i) << std::endl;
+
+  Eigen::MatrixXd Q_cost = betaSteps * (M_steps.transpose() * M_steps) +
+                           1e7 * (M_slack.transpose() * M_slack);
+  // Q_cost += 1e6 * (- A_f *  exp(eta_ * t_)).transpose() * (- A_f *  exp(eta_
+  // * t_));
+  Eigen::VectorXd c_cost = betaSteps * (-M_steps.transpose() * b_steps);
+  // c_cost += 1e6 * (A_f *  exp(eta_ * t_)).transpose() * (b_f * exp(eta_ * t_)
+  // - (N_ * dcm_) );
+
+  Eigen::QuadProgDense QP;
+  // QP.tolerance(5e-4);
+  QP.problem(N_variables, NeqCstr, NineqCstr);
+  bool QPsuccess = QP.solve(Q_cost, c_cost, A_eq, b_eq, A_ineq, b_ineq);
+
+  // if(!QPsuccess)
+  // {
+  //     std::cout << "[Pendulum feasibility solver][Steps solver] " << "[iter :
+  //     " << Niter_ <<"] QP Failed, lowering slack" << std::endl;
+  //     M_slack.block(0,2 * n_steps,N_slack,N_slack) = 1e0 *
+  //     Eigen::MatrixXd::Identity(N_slack,N_slack); Q_cost = betaSteps * (
+  //     M_steps.transpose() * M_steps) + ( M_slack.transpose() * M_slack) ;
+  //     c_cost = betaSteps * (-M_steps.transpose() * b_steps) +
+  //     (-M_slack.transpose() * b_slack) ; QPsuccess = QP.solve(Q_cost, c_cost,
+  //     A_eq, b_eq, A_ineq, b_ineq);
+  // }
+
+  if (!QPsuccess) {
+    std::cout << "[Pendulum feasibility solver][Steps solver] "
+              << "[iter : " << Niter_ << "] QP Failed" << std::endl;
+    return false;
+  }
+
+  solution_ = QP.result();
+
+  Eigen::Vector4d feasibilityOffset =
+      exp(eta_ * t_) *
+      (A_f.block(0, 0, 4, 2 * n_steps) * solution_.segment(0, 2 * n_steps) +
+       b_f);
+  // std::cout << "[Pendulum feasibility solver][Steps solver] output offset "
+  // << std::endl << feasibilityOffset << std::endl;
+
+  for (int i = 0; i < 4; i++) {
+    if (feasibilityOffset(i) < dcm_pose(i) - 1e-5) {
+      std::cout << "[Pendulum feasibility solver][Steps solver] "
+                << "[iter : " << Niter_ << "] solution broken cstr on " << i
+                << std::endl;
+      std::cout << "slack : " << solution_.segment(2 * n_steps + i, 1)
+                << std::endl;
+    }
+  }
+  Polygon feasibilityPolygon = Polygon(N_, feasibilityOffset);
+  feasibilityRegion_ = feasibilityPolygon.Get_Polygone_Corners();
+
+  // std::cout << "Slack Steps: " << solution_.segment(2 * n_steps,N_slack) 
+  // std::endl;
+
+  // optimalSteps_.clear();
+  // NEW DEBUG: guard the write below -- if optimalSteps_.size() or refSteps.size()
+  // is ever smaller than n_steps here, this would silently corrupt the heap via
+  // std::vector::operator[] (no bounds check) instead of the loud, precise abort
+  // _GLIBCXX_ASSERTIONS would give for an at()-style access. Print and skip rather
+  // than let it write out of bounds.
+  if (static_cast<size_t>(n_steps) > optimalSteps_.size() ||
+      static_cast<size_t>(n_steps) > refSteps.size()) {
+    std::cout << "[FS DEBUG][solve_steps WRITE OOB] n_steps=" << n_steps
+              << " optimalSteps_.size()=" << optimalSteps_.size()
+              << " refSteps.size()=" << refSteps.size()
+              << " N_steps=" << N_steps << " Niter_=" << Niter_ << std::endl;
+  }
+  for (int i = 0; i < n_steps; i++) {
+    if (static_cast<size_t>(i) >= optimalSteps_.size() ||
+        static_cast<size_t>(i) >= refSteps.size()) {
+      break;
+    }
+    optimalSteps_[i] = (sva::PTransformd(
+        refSteps[i].rotation(),
+        Eigen::Vector3d{solution_(2 * i), solution_(2 * i + 1),
+                        refSteps[i].translation().z()}));
+    xStep_.segment(2 * i, 2) = solution_.segment(2 * i, 2);
+  }
+  return true;
 }
